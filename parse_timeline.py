@@ -287,13 +287,15 @@ def parse_text_format(path: str, content: str):
     return result
 
 
-def parse_file(path: str):
-    with open(path, "r", encoding="utf-8") as f:
-        content = f.read()
+def parse_content(content: str, source: str = "<clipboard>"):
+    """解析时间轴内容字符串，自动识别 HTML/text 格式。
 
+    content: 文件内容或剪贴板文本
+    source: 来源标识（文件路径或 '<clipboard>'），用于 meta.source
+    """
     # 格式检测：HTML（timeline-box）或文本表格（casts/begins casting）
     if "timeline-box" not in content and re.search(r"casts\b", content):
-        return parse_text_format(path, content)
+        return parse_text_format(source, content)
 
     ruler = parse_ruler(content)
 
@@ -396,7 +398,7 @@ def parse_file(path: str):
 
     result = {
         "meta": {
-            "source": path,
+            "source": source,
             "format": "html",
             "px_per_s": round(cal["px_per_s"], 4),
             "px_per_ms": round(cal["px_per_ms"], 6),
@@ -409,6 +411,11 @@ def parse_file(path: str):
         "events": out_events,
     }
     return result
+
+
+def parse_file(path: str):
+    with open(path, "r", encoding="utf-8") as f:
+        return parse_content(f.read(), path)
 
 
 def main():

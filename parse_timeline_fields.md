@@ -92,42 +92,55 @@
 
 ## 字段含义补充
 
-### display_sec 与网页对应
-网页时间轴显示的 `X.XXX S` 即 `display_sec`。例：
-- begincast `timestamp=4540637` → `display_sec = (4540637 - 4539957)/1000 = 0.680`
-- cast `timestamp=4541735` → `display_sec = 1.778`
+### 两种格式的来源
+- **HTML 格式**：从 rpglogs 网页"时间轴"视图保存的 HTML，含 `timeline-box`、`printEvent({...})`、CSS 像素
+- **文本表格格式**：从 rpglogs 网页"事件→文字展示"视图复制保存的文本，每行 `MM:SS.mmm  施法者 casts 技能 [on 目标]`
+
+脚本通过检测 `timeline-box` 关键字判断格式，自动走对应解析逻辑。
+
+### display_sec 计算
+- **HTML 格式**：`display_sec = (timestamp - fight_start) / 1000`，`fight_start` 由最小二乘拟合反推
+- **text 格式**：直接由行首 `MM:SS.mmm` 解析，`display_sec = MM*60 + SS.mmm`
+
+### display_time 格式
+两种格式统一为 `MM:SS.mmm`（如 `03:27.222`）。
 
 ### type 字段取值逻辑
-每个 timeline-box 的 onmouseover 里含 1~2 个 printEvent：
-- 有引导技能：`begincast` + `cast` 两个事件，主事件取 `cast`，并附 `begincast_sec` 与 `cast_time_ms`
-- 瞬发/无引导技能：仅 `cast` 一个事件，`css_width=0`，无 `begincast_sec`
+- **HTML 格式**：每个 timeline-box 含 1~2 个 printEvent。有引导技能含 `begincast`+`cast`，主事件取 `cast`；瞬发仅 `cast`
+- **text 格式**：每行一个事件。`casts`→`"cast"`，`begins casting`→`"begincast"`
 
-### 像素与时间的换算关系
+### begincast/cast 配对
+- **HTML 格式**：同一 timeline-box 内的 begincast 与 cast 天然配对
+- **text 格式**：按"同施法者+技能、最近未配对 begincast"规则配对。文本是线性事件流，begins 与 casts 之间可能隔其他技能，配对为启发式
+
+### 像素与时间的换算（仅 HTML 格式）
 ```
 display_sec = css_left / px_per_s
 display_sec = (timestamp - fight_start) / 1000
 ```
 两条等价。脚本输出以 timestamp 换算为准（毫秒精度），像素仅作校验。
 
-### failed 标记
-当 timeline-box 的 class 含 `failed` 时，`failed=true`，表示该次施法失败/取消。
+### failed 标记（仅 HTML 格式）
+当 timeline-box 的 class 含 `failed` 时，`failed=true`，表示该次施法失败/取消。text 格式无此信息，`failed=null`。
 
 ---
 
 ## 用法
 
 ```powershell
-# 输出到 stdout
-python parse_timeline.py timeline0.txt
+# 交互选择（自动识别格式）
+python parse_timeline.py -o out.json --pretty
 
-# 输出到文件（推荐，美化缩进）
-python parse_timeline.py timeline0.txt -o out.json --pretty
+# 指定文件（自动识别格式）
+python parse_timeline.py timeline1.txt -o out.json --pretty
 
-# 仅输出指定 sourceID 的事件
+# 仅输出指定 sourceID 的事件（HTML 格式）
 python parse_timeline.py timeline0.txt --source-id 23 -o out.json
 ```
 
 ## 输出示例
+
+### HTML 格式（timeline0.txt）
 
 ```json
 {
@@ -152,5 +165,31 @@ python parse_timeline.py timeline0.txt --source-id 23 -o out.json
   "begincast_sec": 0.68,
   "begincast_time": "00:00.680",
   "cast_time_ms": 1098
+}
+```
+
+### 文本表格格式（timeline1.txt）
+
+```json
+{
+  "display_sec": 2.922,
+  "display_time": "00:02.922",
+  "type": "cast",
+  "source_name": "茭白茭白",
+  "ability_name": "愈合",
+  "target_name": "篬天的蓝耀",
+  "source_id": null,
+  "source_is_friendly": null,
+  "source_marker": null,
+  "ability_guid": null,
+  "ability_type": null,
+  "target_id": null,
+  "target_is_friendly": null,
+  "target_marker": null,
+  "fight": null,
+  "css_left": null,
+  "css_width": null,
+  "failed": null,
+  "timestamp": null
 }
 ```

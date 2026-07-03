@@ -100,6 +100,12 @@
         });
     }
 
+    // ====== tab 是否已选中 ======
+    function isTabSelected(id) {
+        const el = document.getElementById(id);
+        return !!(el && el.classList.contains('selected'));
+    }
+
     // ====== 切换到时间轴视图 ======
     async function switchToTimeline() {
         // 1. 语言：非简中站点则跳转到 cn 站点同报告页
@@ -116,37 +122,43 @@
             return;
         }
 
-        // 2. 已在 施法+时间轴 → 完成
-        const castsTabNow = document.getElementById('filter-casts-tab');
-        if (castsTabNow && castsTabNow.classList.contains('selected')) {
-            showToast('已在时间轴视图');
-            return;
+        // 2. 点击 分析（时间轴上方那一行，若尚未选中）
+        const analyze = document.getElementById('filter-analyze-tab');
+        if (analyze && !analyze.classList.contains('selected')) {
+            analyze.click();
+            showToast('已点击「分析」，等待加载…', '#2d8cf0');
+            await waitFor(() => isTabSelected('filter-analyze-tab'), 8000);
         }
 
-        // 3. 点击 时间轴 tab（若尚未选中）
-        const tlTab = document.getElementById('filter-timeline-tab');
-        if (tlTab && !tlTab.classList.contains('selected')) {
-            tlTab.click();
+        // 3. 点击 时间轴（若尚未选中）
+        const tl = document.getElementById('filter-timeline-tab');
+        if (tl && !tl.classList.contains('selected')) {
+            tl.click();
             showToast('已点击「时间轴」，等待加载…', '#2d8cf0');
+            await waitFor(() => isTabSelected('filter-timeline-tab'), 8000);
         }
 
-        // 4. 轮询等待 casts tab 出现且其 href 含 view=timeline
+        // 4. 轮询等待 施法 tab 出现且其 href 含 view=timeline
         const waited = await waitFor(() => {
             const c = document.getElementById('filter-casts-tab');
             return c && /view=timeline/.test(c.getAttribute('href') || '');
         }, 8000);
 
-        // 5. 点击 施法 tab
+        // 5. 点击 施法（若尚未选中）
         const casts = document.getElementById('filter-casts-tab');
         if (!casts) {
             showToast('找不到「施法」标签，请稍后再试', '#ed4014');
             return;
         }
-        casts.click();
-        showToast(
-            waited ? '已点击「施法」，时间轴即将显示' : '已点击「施法」（未确认时间轴视图）',
-            waited ? '#19be6b' : '#ff9900'
-        );
+        if (!casts.classList.contains('selected')) {
+            casts.click();
+            showToast(
+                waited ? '已点击「施法」，时间轴即将显示' : '已点击「施法」（未确认时间轴视图）',
+                waited ? '#19be6b' : '#ff9900'
+            );
+        } else {
+            showToast('已在时间轴视图', '#19be6b');
+        }
     }
 
     // ====== 点击处理 ======

@@ -2,6 +2,11 @@
 
 把 rpglogs / warcraftlogs 战斗时间轴解析为可筛选的施法序列，并导出 MRT 格式文本。单文件 Python tkinter 桌面应用。
 
+## 相关网站
+
+- [warcraftlogs](https://cn.warcraftlogs.com/) —— 魔兽世界战斗日志分析平台（数据来源，油猴脚本匹配 `*.warcraftlogs.com/reports/*`）
+- [lorrgs](https://lorrgs.io/) —— warcraftlogs 数据的团队时间轴查看工具（数据来源之一）
+
 ## 功能特性
 
 - 自动识别两种输入格式：HTML（油猴脚本复制的 `timeline-box`）与文本表格（`casts` / `begins casting`）

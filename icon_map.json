@@ -256,5 +256,10 @@
   "剑在人在": "ability_warrior_challange.png",
   "微风": "ability_evoker_hoverblack.png",
   "邪能统御": "spell_shadow_felmending.png",
-  "召唤恶魔卫士": "spell_shadow_summonfelguard.png"
+  "召唤恶魔卫士": "spell_shadow_summonfelguard.png",
+  "倒刺射击": "ability_hunter_barbedshot.png",
+  "召唤宠物 1": "ability_hunter_beastcall.png",
+  "复活宠物": "ability_hunter_beastsoothe.png",
+  "眼镜蛇射击": "ability_hunter_cobrashot.png",
+  "狂野怒火": "ability_druid_ferociousbite.png"
 }

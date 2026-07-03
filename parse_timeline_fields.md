@@ -1,6 +1,9 @@
 # parse_timeline.py 事件字段文档
 
-`parse_timeline.py` 将 rpglogs 时间轴 HTML（如 `timeline0.txt`）解析为结构化 JSON。
+`parse_timeline.py` 解析 rpglogs 时间轴文件，自动识别两种格式，输出结构化施法序列 JSON。
+
+- **HTML 格式**（如 `timeline0.txt`）：含 `timeline-box`、`printEvent`、CSS 像素，需实时反推 `fight_start`
+- **文本表格格式**（如 `timeline1.txt`）：纯文本事件行 `MM:SS.mmm  施法者 casts 技能 [on 目标]`，时间已直接给出
 
 输出顶层结构：
 
@@ -15,19 +18,27 @@
 
 ## meta 字段（元数据）
 
-由脚本每次读取文件时实时计算，非硬编码。
+### 通用字段
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `source` | string | 输入文件路径 |
+| `format` | string | 格式标识：`"html"` 或 `"text"` |
+| `total_events` | int | 输出事件总数 |
+| `ruler` | object/null | 时间标尺信息（HTML 格式有，text 为 null） |
+| `filtered_source_id` | int | （可选）仅当使用 `--source-id` 时存在 |
+
+### 仅 HTML 格式（`format=="html"`）
+
+由脚本每次读取文件时实时计算，非硬编码。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
 | `px_per_s` | float | 每秒对应的 CSS 像素数（最小二乘拟合，典型值 70.0） |
 | `px_per_ms` | float | 每毫秒对应的 CSS 像素数（= px_per_s / 1000） |
 | `fight_start` | float | 战斗起始时间戳(ms)，由事件反推得到 |
 | `calibration_samples` | int | 参与拟合的事件样本数 |
 | `total_boxes` | int | 文件中 timeline-box 总数 |
-| `total_events` | int | 输出的事件总数（经 `--source-id` 过滤后为过滤后数量） |
-| `ruler` | object | 时间标尺信息，见下 |
-| `filtered_source_id` | int | （可选）仅当使用 `--source-id` 时存在 |
 
 ### ruler 子字段
 
@@ -41,29 +52,41 @@
 
 ## events 数组（施法序列）
 
-按 `timestamp` 升序排列。每条代表一次施法（cast），瞬发技能与有引导的技能均统一以 cast 时刻排序。
+按时间升序排列。每条代表一次施法事件。
+
+### 通用字段（两种格式都有）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `timestamp` | int | 事件原始时间戳（毫秒），来自 HTML 中 printEvent 的 JSON |
-| `display_sec` | float | 显示秒 = `(timestamp - fight_start) / 1000`，保留 3 位小数，与网页显示一致 |
-| `type` | string | 事件类型：`"cast"`（施法完成）或 `"begincast"`（开始施法）。主事件优先取 cast |
+| `display_sec` | float | 显示秒（战斗内相对时间），保留 3 位小数 |
+| `display_time` | string | 显示时间，格式 `MM:SS.mmm`（如 `03:27.222`） |
+| `type` | string | 事件类型：`"cast"`（施法完成）或 `"begincast"`（开始施法） |
+| `source_name` | string | （仅 text 格式）施法者角色名 |
+| `ability_name` | string | 技能名称（中文，HTML 格式已从 `\uXXXX` 还原） |
+| `target_name` | string/null | 目标名称（text 格式友方目标有值；HTML 格式仅环境/Boss 目标有值） |
+| `begincast_sec` | float | （可选）配对 begincast 的显示秒，仅当配对成功时存在 |
+| `begincast_time` | string | （可选）配对 begincast 的显示时间，格式 `MM:SS.mmm` |
+| `cast_time_ms` | int | （可选）施法耗时 = `cast - begincast`（毫秒），仅当配对时存在 |
+
+### 仅 HTML 格式（`format=="html"`）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `timestamp` | int | 事件原始时间戳（毫秒），来自 printEvent JSON |
 | `source_id` | int | 施法者 ID |
 | `source_is_friendly` | bool | 施法者是否友方 |
-| `source_marker` | int | 施法者标记位（rpglogs 角色颜色标记） |
-| `ability_name` | string | 技能名称（中文，已从 `\uXXXX` 还原） |
+| `source_marker` | int | 施法者标记位（rpglogs 颜色标记） |
 | `ability_guid` | int | 技能 ID（游戏内 spell id） |
 | `ability_type` | int | 技能类型/学派（1=物理，8=自然等） |
-| `target_id` | int | 目标 ID（友方目标用 `targetID` 字段；环境目标为 -1） |
-| `target_name` | string | 目标名称（仅环境/Boss 目标有值，友方玩家目标为 null） |
+| `target_id` | int | 目标 ID（环境目标为 -1） |
 | `target_is_friendly` | bool | 目标是否友方 |
 | `target_marker` | int | 目标标记位（可选，无则为 null） |
 | `fight` | int | 战斗 ID |
-| `css_left` | float | 该 timeline-box 的 CSS `left` 像素值 |
-| `css_width` | float | 该 timeline-box 的 CSS `width` 像素值（瞬发技能为 0） |
+| `css_left` | float | timeline-box 的 CSS `left` 像素值 |
+| `css_width` | float | timeline-box 的 CSS `width` 像素值（瞬发为 0） |
 | `failed` | bool | 施法是否失败（class 含 `failed`） |
-| `begincast_sec` | float | （可选）配对 begincast 的显示秒，仅当 box 内同时含 begincast+cast 时存在 |
-| `cast_time_ms` | int | （可选）施法耗时 = `cast.timestamp - begincast.timestamp`，仅当配对时存在 |
+
+> text 格式中以上 HTML 专有字段均置为 `null`。
 
 ---
 
@@ -110,6 +133,7 @@ python parse_timeline.py timeline0.txt --source-id 23 -o out.json
 {
   "timestamp": 4541735,
   "display_sec": 1.778,
+  "display_time": "00:01.778",
   "type": "cast",
   "source_id": 23,
   "source_is_friendly": true,
@@ -126,6 +150,7 @@ python parse_timeline.py timeline0.txt --source-id 23 -o out.json
   "css_width": 76.86,
   "failed": false,
   "begincast_sec": 0.68,
+  "begincast_time": "00:00.680",
   "cast_time_ms": 1098
 }
 ```

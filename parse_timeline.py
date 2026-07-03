@@ -181,9 +181,119 @@ def compute_calibration(boxes):
     }
 
 
+def format_display_time(sec: float) -> str:
+    """将秒数格式化为 MM:SS.mmm，如 207.222 -> '03:27.222'"""
+    if sec < 0:
+        sec = 0.0
+    total_ms = int(round(sec * 1000))
+    mm, rest = divmod(total_ms, 60000)
+    ss, ms = divmod(rest, 1000)
+    return f"{mm:02d}:{ss:02d}.{ms:03d}"
+
+
+def parse_text_format(path: str, content: str):
+    """解析文本表格格式的时间轴（如 timeline1.txt）。
+
+    事件行格式：
+        MM:SS.mmm\t 施法者 casts 技能 [on 目标]
+        MM:SS.mmm\t 施法者 begins casting 技能
+    """
+    # 时间标签 -> 秒
+    def time_to_sec(t: str) -> float:
+        m, rest = t.split(":")
+        return int(m) * 60 + float(rest)
+
+    event_pattern = re.compile(
+        r"^(\d{2}:\d{2}\.\d{3})\s+(\S+(?:\s+\S+)*?)\s+(casts|begins casting)\s+(.+?)(?:\s+on\s+(.+))?$"
+    )
+
+    raw_events = []
+    for line in content.splitlines():
+        line = line.strip()
+        m = event_pattern.match(line)
+        if not m:
+            continue
+        time_str = m.group(1)
+        source_name = m.group(2).strip()
+        verb = m.group(3)
+        ability_name = m.group(4).strip()
+        target_name = m.group(5)
+        if target_name is not None:
+            target_name = target_name.strip()
+        ev_type = "cast" if verb == "casts" else "begincast"
+        sec = time_to_sec(time_str)
+        raw_events.append(
+            {
+                "display_sec": round(sec, 3),
+                "display_time": time_str,
+                "type": ev_type,
+                "source_name": source_name,
+                "ability_name": ability_name,
+                "target_name": target_name,
+            }
+        )
+
+    # begincast/cast 配对：按时间顺序，同一施法者+技能，begincast 紧接 cast
+    # 文本格式里 begins casting 后通常紧跟一条 casts（同技能）。
+    # 构建 (source, ability) -> 最近未配对 begincast 映射
+    pending = {}
+    out_events = []
+    for ev in raw_events:
+        key = (ev["source_name"], ev["ability_name"])
+        if ev["type"] == "begincast":
+            pending[key] = ev
+            # begincast 也单独作为一条事件输出（用户要求统一用 cast 时刻排序，
+            # 文本格式无像素/CSS，begincast 单独列出便于完整性）
+            out_events.append(ev)
+        else:  # cast
+            bc = pending.pop(key, None)
+            if bc is not None:
+                ev["begincast_sec"] = bc["display_sec"]
+                ev["begincast_time"] = bc["display_time"]
+                ev["cast_time_ms"] = int(
+                    round((ev["display_sec"] - bc["display_sec"]) * 1000)
+                )
+            out_events.append(ev)
+
+    # 按 display_sec 排序
+    out_events.sort(key=lambda e: e["display_sec"])
+
+    # 补齐 HTML 格式对齐的字段（缺失的置 None）
+    for e in out_events:
+        e.setdefault("source_id", None)
+        e.setdefault("source_is_friendly", None)
+        e.setdefault("source_marker", None)
+        e.setdefault("ability_guid", None)
+        e.setdefault("ability_type", None)
+        e.setdefault("target_id", None)
+        e.setdefault("target_is_friendly", None)
+        e.setdefault("target_marker", None)
+        e.setdefault("fight", None)
+        e.setdefault("css_left", None)
+        e.setdefault("css_width", None)
+        e.setdefault("failed", None)
+        # 统一字段名：文本格式用 source_name，补一个 source_id=None 已设
+        e["timestamp"] = None
+
+    result = {
+        "meta": {
+            "source": path,
+            "format": "text",
+            "total_events": len(out_events),
+            "ruler": None,
+        },
+        "events": out_events,
+    }
+    return result
+
+
 def parse_file(path: str):
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
+
+    # 格式检测：HTML（timeline-box）或文本表格（casts/begins casting）
+    if "timeline-box" not in content and re.search(r"casts\b", content):
+        return parse_text_format(path, content)
 
     ruler = parse_ruler(content)
 
@@ -250,6 +360,7 @@ def parse_file(path: str):
         entry = {
             "timestamp": ts,
             "display_sec": round(display_sec, 3),
+            "display_time": format_display_time(display_sec),
             "type": main.get("type"),
             "source_id": main.get("sourceID"),
             "source_is_friendly": main.get("sourceIsFriendly"),
@@ -270,6 +381,7 @@ def parse_file(path: str):
         if begincast and cast and cast is main:
             bc_sec = (begincast["timestamp"] - cal["fight_start"]) / 1000.0
             entry["begincast_sec"] = round(bc_sec, 3)
+            entry["begincast_time"] = format_display_time(bc_sec)
             entry["cast_time_ms"] = cast["timestamp"] - begincast["timestamp"]
         elif begincast and begincast is main and cast:
             # 主事件是 begincast 但也有 cast（不应发生，留作兼容）
@@ -285,6 +397,7 @@ def parse_file(path: str):
     result = {
         "meta": {
             "source": path,
+            "format": "html",
             "px_per_s": round(cal["px_per_s"], 4),
             "px_per_ms": round(cal["px_per_ms"], 6),
             "fight_start": round(cal["fight_start"], 1),
@@ -347,12 +460,19 @@ def main():
     with open(out_file, "w", encoding="utf-8") as f:
         f.write(out_str)
     m = result["meta"]
-    print(
-        f"[OK] {os.path.basename(src_file)} -> {out_file}\n"
-        f"     px_per_s={m['px_per_s']}  fight_start={m['fight_start']}  "
-        f"samples={m['calibration_samples']}  events={m['total_events']}",
-        file=sys.stderr,
-    )
+    if m.get("format") == "text":
+        print(
+            f"[OK] {os.path.basename(src_file)} -> {out_file}\n"
+            f"     format=text  events={m['total_events']}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[OK] {os.path.basename(src_file)} -> {out_file}\n"
+            f"     px_per_s={m['px_per_s']}  fight_start={m['fight_start']}  "
+            f"samples={m['calibration_samples']}  events={m['total_events']}",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":

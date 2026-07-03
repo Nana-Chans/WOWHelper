@@ -11,18 +11,337 @@
 import io
 import json
 import os
+import re
 import sys
 import tkinter as tk
 import urllib.request
 from tkinter import ttk, messagebox, filedialog
-
-from parse_timeline import parse_content
 
 # 默认强力技能（首次运行写入配置文件，之后以配置文件为准）
 DEFAULT_STRONG_ABILITIES = ["万灵之召", "宁静", "激活"]
 
 ICON_BASE_URL = "https://assets.rpglogs.cn/img/warcraft/abilities/"
 ICON_SIZE = (28, 28)  # 显示尺寸（原图 56×56，放大显示更清晰）
+
+
+# ==================== 时间轴解析（原 parse_timeline.py） ====================
+
+
+def _html_unescape(s: str) -> str:
+    """HTML 转义还原"""
+    s = s.replace("&quot;", '"')
+    s = s.replace("&amp;", "&")
+    s = s.replace("&lt;", "<")
+    s = s.replace("&gt;", ">")
+    s = s.replace("&#39;", "'")
+    return s
+
+
+def _unicode_decode(s: str) -> str:
+    """将 \\uXXXX 形式的转义还原为字符"""
+    return re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), s)
+
+
+def _extract_balanced_json(s: str, start: int):
+    """从 s[start] 处的 '{' 开始，匹配平衡花括号，返回 (json_str, end_index)。
+    end_index 指向闭合 '}' 的下一个字符。若不匹配返回 (None, start)。"""
+    if start >= len(s) or s[start] != "{":
+        return None, start
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(s)):
+        c = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        else:
+            if c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return s[start : i + 1], i + 1
+    return None, start
+
+
+def _extract_print_events(onmouseover_attr: str):
+    """从 onmouseover 属性值中提取所有 printEvent({...}) 的 JSON 对象"""
+    raw = _html_unescape(onmouseover_attr)
+    events = []
+    pos = 0
+    while True:
+        m = re.search(r"printEvent\(\s*", raw[pos:])
+        if not m:
+            break
+        brace_start = pos + m.end()
+        if brace_start >= len(raw) or raw[brace_start] != "{":
+            pos = brace_start
+            continue
+        json_str, end = _extract_balanced_json(raw, brace_start)
+        if json_str is None:
+            pos = brace_start + 1
+            continue
+        json_str = _unicode_decode(json_str)
+        try:
+            obj = json.loads(json_str)
+            events.append(obj)
+        except json.JSONDecodeError as e:
+            print(f"[WARN] JSON 解析失败: {e}", file=sys.stderr)
+            print(f"       raw: {json_str[:200]}", file=sys.stderr)
+        pos = end
+    return events
+
+
+def _parse_ruler(content: str):
+    """解析时间标尺：返回 (first_label, last_label, count)"""
+    labels = re.findall(r'timeline-ruler-number">([^<]+)<', content)
+    if not labels:
+        return None
+    return {"first": labels[0], "last": labels[-1], "count": len(labels)}
+
+
+def _compute_calibration(boxes):
+    """用最小二乘法从 (timestamp, css_left) 拟合 px_per_ms 与 fight_start。"""
+    xs, ys = [], []
+    for b in boxes:
+        ev = b["events"][0] if b["events"] else None
+        if ev is None or "timestamp" not in ev:
+            continue
+        xs.append(b["css_left"])
+        ys.append(ev["timestamp"])
+    n = len(xs)
+    if n < 2:
+        return {"px_per_ms": 70.0 / 1000.0, "px_per_s": 70.0, "fight_start": 4539957.0, "n": n}
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    sxx = sum((x - mean_x) ** 2 for x in xs)
+    sxy = sum((xs[i] - mean_x) * (ys[i] - mean_y) for i in range(n))
+    if sxx == 0:
+        return {"px_per_ms": 70.0 / 1000.0, "px_per_s": 70.0, "fight_start": mean_y, "n": n}
+    a = sxy / sxx
+    b = mean_y - a * mean_x
+    px_per_ms = 1.0 / a
+    return {"px_per_ms": px_per_ms, "px_per_s": px_per_ms * 1000.0, "fight_start": b, "n": n}
+
+
+def _format_display_time(sec: float) -> str:
+    """将秒数格式化为 MM:SS.mmm，如 207.222 -> '03:27.222'"""
+    if sec < 0:
+        sec = 0.0
+    total_ms = int(round(sec * 1000))
+    mm, rest = divmod(total_ms, 60000)
+    ss, ms = divmod(rest, 1000)
+    return f"{mm:02d}:{ss:02d}.{ms:03d}"
+
+
+def _parse_text_format(source: str, content: str):
+    """解析文本表格格式的时间轴（如 timeline1.txt）。
+
+    事件行格式：
+        MM:SS.mmm\t 施法者 casts 技能 [on 目标]
+        MM:SS.mmm\t 施法者 begins casting 技能
+    """
+    def time_to_sec(t: str) -> float:
+        m, rest = t.split(":")
+        return int(m) * 60 + float(rest)
+
+    event_pattern = re.compile(
+        r"^(\d{2}:\d{2}\.\d{3})\s+(\S+(?:\s+\S+)*?)\s+(casts|begins casting)\s+(.+?)(?:\s+on\s+(.+))?$"
+    )
+
+    raw_events = []
+    for line in content.splitlines():
+        line = line.strip()
+        m = event_pattern.match(line)
+        if not m:
+            continue
+        time_str = m.group(1)
+        source_name = m.group(2).strip()
+        verb = m.group(3)
+        ability_name = m.group(4).strip()
+        target_name = m.group(5)
+        if target_name is not None:
+            target_name = target_name.strip()
+        ev_type = "cast" if verb == "casts" else "begincast"
+        sec = time_to_sec(time_str)
+        raw_events.append(
+            {
+                "display_sec": round(sec, 3),
+                "display_time": time_str,
+                "type": ev_type,
+                "source_name": source_name,
+                "ability_name": ability_name,
+                "target_name": target_name,
+            }
+        )
+
+    # begincast/cast 配对
+    pending = {}
+    out_events = []
+    for ev in raw_events:
+        key = (ev["source_name"], ev["ability_name"])
+        if ev["type"] == "begincast":
+            pending[key] = ev
+            out_events.append(ev)
+        else:
+            bc = pending.pop(key, None)
+            if bc is not None:
+                ev["begincast_sec"] = bc["display_sec"]
+                ev["begincast_time"] = bc["display_time"]
+                ev["cast_time_ms"] = int(
+                    round((ev["display_sec"] - bc["display_sec"]) * 1000)
+                )
+            out_events.append(ev)
+
+    out_events.sort(key=lambda e: e["display_sec"])
+
+    for e in out_events:
+        e.setdefault("source_id", None)
+        e.setdefault("source_is_friendly", None)
+        e.setdefault("source_marker", None)
+        e.setdefault("ability_guid", None)
+        e.setdefault("ability_type", None)
+        e.setdefault("ability_icon", None)
+        e.setdefault("target_id", None)
+        e.setdefault("target_is_friendly", None)
+        e.setdefault("target_marker", None)
+        e.setdefault("fight", None)
+        e.setdefault("css_left", None)
+        e.setdefault("css_width", None)
+        e.setdefault("failed", None)
+        e["timestamp"] = None
+
+    return {
+        "meta": {
+            "source": source,
+            "format": "text",
+            "total_events": len(out_events),
+            "ruler": None,
+        },
+        "events": out_events,
+    }
+
+
+def parse_content(content: str, source: str = "<clipboard>"):
+    """解析时间轴内容字符串，自动识别 HTML/text 格式。
+
+    content: 文件内容或剪贴板文本
+    source: 来源标识（文件路径或 '<clipboard>'），用于 meta.source
+    """
+    # 格式检测：HTML（timeline-box）或文本表格（casts/begins casting）
+    if "timeline-box" not in content and re.search(r"casts\b", content):
+        return _parse_text_format(source, content)
+
+    ruler = _parse_ruler(content)
+
+    box_pattern = re.compile(
+        r'<div\s+onmouseover="([^"]*)"[^>]*'
+        r'class="timeline-box([^"]*)"[^>]*'
+        r'style="width:\s*([\d.]+)px;\s*left:\s*([\d.]+)px;',
+        re.DOTALL,
+    )
+
+    boxes = []
+    for m in box_pattern.finditer(content):
+        onmouseover = m.group(1)
+        class_extra = m.group(2)
+        width = float(m.group(3))
+        left = float(m.group(4))
+        events = _extract_print_events(onmouseover)
+        failed = "failed" in class_extra
+        boxes.append(
+            {"events": events, "css_left": left, "css_width": width, "failed": failed}
+        )
+
+    if not boxes:
+        print("[WARN] 未找到任何 timeline-box", file=sys.stderr)
+
+    cal = _compute_calibration(boxes)
+
+    out_events = []
+    for b in boxes:
+        events = b["events"]
+        begincast = None
+        cast = None
+        for ev in events:
+            if ev.get("type") == "begincast":
+                begincast = ev
+            elif ev.get("type") == "cast":
+                cast = ev
+        main = cast if cast else (begincast if begincast else (events[0] if events else None))
+        if main is None:
+            continue
+        ts = main.get("timestamp")
+        if ts is None:
+            continue
+
+        display_sec = (ts - cal["fight_start"]) / 1000.0
+        ability = main.get("ability", {})
+        target = main.get("target")
+        target_id = main.get("targetID", target.get("id") if target else None)
+        target_name = target.get("name") if target else None
+        target_is_friendly = main.get("targetIsFriendly")
+
+        entry = {
+            "timestamp": ts,
+            "display_sec": round(display_sec, 3),
+            "display_time": _format_display_time(display_sec),
+            "type": main.get("type"),
+            "source_id": main.get("sourceID"),
+            "source_is_friendly": main.get("sourceIsFriendly"),
+            "source_marker": main.get("sourceMarker"),
+            "ability_name": ability.get("name"),
+            "ability_guid": ability.get("guid"),
+            "ability_type": ability.get("type"),
+            "ability_icon": ability.get("abilityIcon"),
+            "target_id": target_id,
+            "target_name": target_name,
+            "target_is_friendly": target_is_friendly,
+            "target_marker": main.get("targetMarker"),
+            "fight": main.get("fight"),
+            "css_left": b["css_left"],
+            "css_width": b["css_width"],
+            "failed": b["failed"],
+        }
+
+        if begincast and cast and cast is main:
+            bc_sec = (begincast["timestamp"] - cal["fight_start"]) / 1000.0
+            entry["begincast_sec"] = round(bc_sec, 3)
+            entry["begincast_time"] = _format_display_time(bc_sec)
+            entry["cast_time_ms"] = cast["timestamp"] - begincast["timestamp"]
+        elif begincast and begincast is main and cast:
+            ct_sec = (cast["timestamp"] - cal["fight_start"]) / 1000.0
+            entry["cast_sec"] = round(ct_sec, 3)
+            entry["cast_time_ms"] = cast["timestamp"] - begincast["timestamp"]
+
+        out_events.append(entry)
+
+    out_events.sort(key=lambda e: e["timestamp"])
+
+    return {
+        "meta": {
+            "source": source,
+            "format": "html",
+            "px_per_s": round(cal["px_per_s"], 4),
+            "px_per_ms": round(cal["px_per_ms"], 6),
+            "fight_start": round(cal["fight_start"], 1),
+            "calibration_samples": cal["n"],
+            "total_boxes": len(boxes),
+            "total_events": len(out_events),
+            "ruler": ruler,
+        },
+        "events": out_events,
+    }
+
+
+# ==================== GUI ====================
 
 
 class TimelineViewer:

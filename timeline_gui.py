@@ -8,16 +8,21 @@
 用法:
     python timeline_gui.py
 """
+import io
 import json
 import os
 import sys
 import tkinter as tk
+import urllib.request
 from tkinter import ttk, messagebox, filedialog
 
 from parse_timeline import parse_content
 
 # 默认强力技能（首次运行写入配置文件，之后以配置文件为准）
 DEFAULT_STRONG_ABILITIES = ["万灵之召", "宁静", "激活"]
+
+ICON_BASE_URL = "https://assets.rpglogs.cn/img/warcraft/abilities/"
+ICON_SIZE = (28, 28)  # 显示尺寸（原图 56×56，放大显示更清晰）
 
 
 class TimelineViewer:
@@ -34,6 +39,8 @@ class TimelineViewer:
         self.strong_skills = self._load_strong_skills()  # 从配置文件加载
         self.phases = []          # 阶段起始时间列表(秒,升序)；P1 隐含 0；空=单阶段
         self.phase_entries = []   # 阶段时间 Entry 控件列表(与 phases 对应)
+        self.icon_images = {}     # ability_name -> tk.PhotoImage (保持引用防止GC)
+        self.name_to_iconfile = self._load_icon_map()  # name -> icon文件名
 
         self._build_ui()
 
@@ -72,11 +79,8 @@ class TimelineViewer:
             "<Configure>",
             lambda e: self.canvas.itemconfig(self.ability_window, width=e.width),
         )
-        # 鼠标滚轮
-        self.canvas.bind_all(
-            "<MouseWheel>",
-            lambda e: self.canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"),
-        )
+        # 鼠标滚轮：仅在技能筛选区滚动其 canvas，其余区域交给控件原生处理
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
 
         # 阶段控制区
         pf = ttk.LabelFrame(self.root, text="阶段（多阶段BOSS手动设置转阶段时间）", padding=6)
@@ -92,11 +96,17 @@ class TimelineViewer:
         # --- Tab 1: 时间轴 ---
         tab_timeline = ttk.Frame(nb)
         nb.add(tab_timeline, text="时间轴")
+        # 设置 Treeview 行高适配图标(28px + 间距)
+        style = ttk.Style()
+        style.configure("Treeview", rowheight=32)
         self.tree = ttk.Treeview(
-            tab_timeline, columns=("time", "ability"), show="headings", selectmode="browse"
+            tab_timeline, columns=("time", "ability"), show="tree headings", selectmode="browse",
+            style="Treeview",
         )
+        self.tree.heading("#0", text="")
         self.tree.heading("time", text="时间")
         self.tree.heading("ability", text="技能")
+        self.tree.column("#0", width=34, stretch=False, anchor="center")
         self.tree.column("time", width=120, anchor="center", stretch=False)
         self.tree.column("ability", width=400, anchor="w", stretch=True)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -177,6 +187,9 @@ class TimelineViewer:
         for e in self.cast_events:
             name = e.get("ability_name") or "?"
             self.ability_counts[name] = self.ability_counts.get(name, 0) + 1
+
+        # 收集图标映射（HTML 格式有 ability_icon）
+        self._update_icon_map_from_events()
 
         # 重置阶段
         self._reset_phases()
@@ -340,6 +353,118 @@ class TimelineViewer:
         self.phases = []
         self._rebuild_phase_controls()
 
+    def _on_mousewheel(self, e):
+        """滚轮事件：仅当鼠标位于技能筛选区(canvas/ability_frame 及其子级)时滚动 canvas。
+        其余区域(Treeview/MRT)交给控件原生处理，不干预。"""
+        w = e.widget
+        cur = w
+        while cur is not None:
+            if cur is self.canvas or cur is self.ability_frame:
+                self.canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+                return
+            cur = cur.master
+
+    # ---------- 图标 ----------
+    def _icons_dir(self) -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
+
+    def _icon_map_path(self) -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon_map.json")
+
+    def _load_icon_map(self):
+        """从 icon_map.json 加载 name->PNG文件名 映射。自动迁移旧 .jpg 条目为 .png。"""
+        path = self._icon_map_path()
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                result = {}
+                migrated = False
+                for k, v in data.items():
+                    v = str(v)
+                    if v.lower().endswith(".jpg"):
+                        v = os.path.splitext(v)[0] + ".png"
+                        migrated = True
+                    result[str(k)] = v
+                if migrated:
+                    try:
+                        with open(path, "w", encoding="utf-8") as f:
+                            json.dump(result, f, ensure_ascii=False, indent=2)
+                    except OSError:
+                        pass
+                return result
+        except (OSError, json.JSONDecodeError):
+            pass
+        return {}
+
+    def _save_icon_map(self):
+        try:
+            with open(self._icon_map_path(), "w", encoding="utf-8") as f:
+                json.dump(self.name_to_iconfile, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    def _update_icon_map_from_events(self):
+        """从当前事件中收集 name->PNG图标名，更新映射并保存。
+
+        HTML 的 abilityIcon 是 .jpg 名，存入时转为 .png 名。
+        """
+        changed = False
+        for e in self.events:
+            name = e.get("ability_name")
+            icon = e.get("ability_icon")
+            if name and icon and name not in self.name_to_iconfile:
+                png_name = os.path.splitext(icon)[0] + ".png"
+                self.name_to_iconfile[name] = png_name
+                changed = True
+        if changed:
+            self._save_icon_map()
+
+    def _get_icon(self, ability_name):
+        """返回 ability_name 对应的 tk.PhotoImage（下载+缓存）。无则返回 None。
+
+        映射存的是 PNG 文件名。本地无 PNG 时，从 rpglogs 下载 JPG 到内存
+        （BytesIO，JPG 不落盘），PIL 转 PNG 并缩放后保存，供 tk.PhotoImage 显示。
+        """
+        if not ability_name:
+            return None
+        if ability_name in self.icon_images:
+            return self.icon_images[ability_name]
+        icon_png = self.name_to_iconfile.get(ability_name)
+        if not icon_png:
+            return None
+        icons_dir = self._icons_dir()
+        local_png = os.path.join(icons_dir, icon_png)
+        if not os.path.exists(local_png):
+            # 由 PNG 名派生 JPG 名供 URL 使用（rpglogs 源是 .jpg）
+            icon_jpg = os.path.splitext(icon_png)[0] + ".jpg"
+            url = ICON_BASE_URL + icon_jpg
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                data = urllib.request.urlopen(req, timeout=10).read()
+            except Exception:
+                return None
+            # 下载到内存后直接转 PNG（JPG 不落盘，无需后续删除）
+            try:
+                from PIL import Image
+                img = Image.open(io.BytesIO(data)).convert("RGBA")
+                try:
+                    resample = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
+                except AttributeError:
+                    resample = Image.LANCZOS  # type: ignore[attr-defined]
+                img = img.resize(ICON_SIZE, resample)
+                os.makedirs(icons_dir, exist_ok=True)
+                img.save(local_png)
+            except Exception:
+                return None
+        # 加载为 tk.PhotoImage（原生支持 PNG，ttk 控件显示稳定）
+        try:
+            photo = tk.PhotoImage(file=local_png)
+            self.icon_images[ability_name] = photo
+            return photo
+        except Exception:
+            return None
+
     # ---------- 复选框 ----------
     def _build_checkboxes(self, prev_checked=None):
         """构建技能复选框。
@@ -371,9 +496,12 @@ class TimelineViewer:
                 var = tk.BooleanVar(value=checked)
                 self.ability_vars[name] = var
                 r, c = divmod(i, cols)
+                icon = self._get_icon(name)
                 cb = ttk.Checkbutton(
                     container,
                     text=f"{name} ({cnt})",
+                    image=icon,
+                    compound="left" if icon else "none",
                     variable=var,
                     command=self._refresh_table,
                 )
@@ -501,17 +629,23 @@ class TimelineViewer:
                         tags=("phase_div",),
                     )
                     next_phase_idx, next_phase_sec = next(phase_iter, (None, None))
+                name = e.get("ability_name", "")
+                icon = self._get_icon(name)
                 self.tree.insert(
                     "",
                     "end",
-                    values=(e.get("display_time", ""), e.get("ability_name", "")),
+                    values=(e.get("display_time", ""), name),
+                    image=icon if icon else "",
                 )
         else:
             for e in shown:
+                name = e.get("ability_name", "")
+                icon = self._get_icon(name)
                 self.tree.insert(
                     "",
                     "end",
-                    values=(e.get("display_time", ""), e.get("ability_name", "")),
+                    values=(e.get("display_time", ""), name),
+                    image=icon if icon else "",
                 )
         total = len(self.cast_events)
         self.status_var.set(

@@ -370,6 +370,7 @@ def parse_content(content: str, source: str = "<clipboard>"):
             "ability_name": ability.get("name"),
             "ability_guid": ability.get("guid"),
             "ability_type": ability.get("type"),
+            "ability_icon": ability.get("abilityIcon"),
             "target_id": target_id,
             "target_name": target_name,
             "target_is_friendly": target_is_friendly,

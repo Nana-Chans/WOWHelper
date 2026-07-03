@@ -510,8 +510,6 @@ class TimelineViewer:
         # 收集图标映射（HTML 格式有 ability_icon）
         self._update_icon_map_from_events()
 
-        # 重置阶段
-        self._reset_phases()
         self._build_checkboxes()
         self._refresh_table()
         self.status_var.set(
@@ -535,9 +533,6 @@ class TimelineViewer:
         self.mrt_text.insert("1.0", msg)
         self.mrt_text.configure(state="disabled")
         self.status_var.set("解析失败")
-        # 重置阶段
-        self.phases = []
-        self._rebuild_phase_controls()
 
     # ---------- 阶段 ----------
     def _parse_time_str(self, s: str):

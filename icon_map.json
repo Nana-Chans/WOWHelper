@@ -16,5 +16,21 @@
   "狂奔怒吼": "spell_druid_stampedingroar_cat.png",
   "旅行形态": "ability_druid_travelform.png",
   "野性冲锋": "trade_archaeology_antleredcloakclasp.png",
-  "光注法力药水": "inv_12_profession_alchemy_lightpotion_blue.png"
+  "光注法力药水": "inv_12_profession_alchemy_lightpotion_blue.png",
+  "圣光闪现": "spell_holy_flashheal.png",
+  "神圣震击": "spell_holy_searinglight.png",
+  "光环掌握": "spell_holy_auramastery.png",
+  "永恒之火": "inv_torch_thrown.png",
+  "复仇之怒": "spell_holy_avenginewrath.png",
+  "圣光术": "spell_holy_surgeoflight.png",
+  "黎明之光": "spell_paladin_lightofdawn.png",
+  "虔诚光环": "spell_holy_devotionaura.png",
+  "圣洁鸣钟": "inv_ability_paladin_divinetoll.png",
+  "神圣马驹": "ability_paladin_divinesteed.png",
+  "圣佑术": "spell_holy_divineprotection.png",
+  "牺牲祝福": "spell_holy_sealofsacrifice.png",
+  "银月城生命药水": "inv_potion_49.png",
+  "吞噬之梦药水": "inv_12_profession_alchemy_voidpotion_blue.png",
+  "降落伞": "spell_magic_featherfall.png",
+  "圣盾术": "spell_holy_divineshield.png"
 }

@@ -20,19 +20,19 @@
 ## 环境与依赖
 
 - Windows 桌面会话（tkinter GUI）
-- Python 3.11（代码用 `Image.Resampling.LANCZOS`，保留 3.10 前回退分支）
+- Python 3.11
 - 唯一第三方依赖：`pillow`
 - 无 requirements.txt；重装用 `pip install pillow`
 
 ## 快速开始
 
 ```bash
-git clone <repo>
+git clone https://github.com/Nana-Chans/WOWHelper.git
 cd WOWHelper
-.venv\Scripts\python.exe timeline_gui.py
+python timeline_gui.py
 ```
 
-无 venv 时：
+使用venv：
 
 ```bash
 python -m venv .venv

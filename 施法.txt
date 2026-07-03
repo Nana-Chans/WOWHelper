@@ -1,0 +1,1 @@
+<a class="filter-type-tab drop" id="filter-casts-tab" onload="changeFilterType('casts', this)" href="/reports/pRtrJnv4bQP6Z7mc?fight=46&amp;source=99&amp;type=casts">施法</a>

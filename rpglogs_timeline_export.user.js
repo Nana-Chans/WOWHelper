@@ -13,7 +13,8 @@
     'use strict';
 
     // ====== 配置 ======
-    const BTN_TEXT = '📋 复制 Timeline';
+    const BTN_COPY_TEXT = '📋 复制 Timeline';
+    const BTN_SWITCH_TEXT = '🔄 切换时间轴视图';
     const CHECK_INTERVAL = 1000; // 检测按钮是否已插入的间隔(ms)
     const INIT_DELAY = 1200;     // 首次插入延迟(等 SPA 渲染)
 
@@ -81,15 +82,86 @@
         setTimeout(() => t.remove(), 2100);
     }
 
+    // ====== 校验：当前是否为简体中文站点 ======
+    function isZhCNSite() {
+        const h = location.hostname;
+        return h.indexOf('cn.') === 0 || h.indexOf('.cn', h.length - 3) >= 0;
+    }
+
+    // ====== 轮询条件，超时返回 false ======
+    function waitFor(cond, timeoutMs) {
+        return new Promise(resolve => {
+            const start = Date.now();
+            (function check() {
+                if (cond()) return resolve(true);
+                if (Date.now() - start >= timeoutMs) return resolve(false);
+                setTimeout(check, 200);
+            })();
+        });
+    }
+
+    // ====== 切换到时间轴视图 ======
+    async function switchToTimeline() {
+        // 1. 语言：非简中站点则跳转到 cn 站点同报告页
+        if (!isZhCNSite()) {
+            const cnLink = document.querySelector(
+                '#header-language-picker-element a.header-language-picker__dropdown-item[hreflang="cn"]'
+            );
+            if (cnLink && cnLink.getAttribute('href')) {
+                showToast('正在切换到简体中文站点…', '#2d8cf0');
+                location.href = cnLink.href; // 整页跳转，后续点 tab 由跳转后的脚本实例完成
+                return;
+            }
+            showToast('未找到简体中文链接，请在右上角手动切换', '#ed4014');
+            return;
+        }
+
+        // 2. 已在 施法+时间轴 → 完成
+        const castsTabNow = document.getElementById('filter-casts-tab');
+        if (castsTabNow && castsTabNow.classList.contains('selected')) {
+            showToast('已在时间轴视图');
+            return;
+        }
+
+        // 3. 点击 时间轴 tab（若尚未选中）
+        const tlTab = document.getElementById('filter-timeline-tab');
+        if (tlTab && !tlTab.classList.contains('selected')) {
+            tlTab.click();
+            showToast('已点击「时间轴」，等待加载…', '#2d8cf0');
+        }
+
+        // 4. 轮询等待 casts tab 出现且其 href 含 view=timeline
+        const waited = await waitFor(() => {
+            const c = document.getElementById('filter-casts-tab');
+            return c && /view=timeline/.test(c.getAttribute('href') || '');
+        }, 8000);
+
+        // 5. 点击 施法 tab
+        const casts = document.getElementById('filter-casts-tab');
+        if (!casts) {
+            showToast('找不到「施法」标签，请稍后再试', '#ed4014');
+            return;
+        }
+        casts.click();
+        showToast(
+            waited ? '已点击「施法」，时间轴即将显示' : '已点击「施法」（未确认时间轴视图）',
+            waited ? '#19be6b' : '#ff9900'
+        );
+    }
+
     // ====== 点击处理 ======
     async function onCopyClick(btn) {
+        if (!isZhCNSite()) {
+            showToast('请先在右上角将 Language 切换为简体中文（cn. 站点）后再复制', '#ed4014');
+            return;
+        }
         btn.disabled = true;
         const old = btn.textContent;
         btn.textContent = '⏳ 复制中...';
         try {
             const html = getTimelineHTML();
             if (!html) {
-                showToast('未找到时间轴！请切到「施法→时间轴」视图', '#ed4014');
+                showToast('未找到时间轴！请点上方「切换时间轴视图」', '#ed4014');
                 return;
             }
             const ok = await copyToClipboard(html);
@@ -107,24 +179,45 @@
         }
     }
 
-    // ====== 插入按钮 ======
+    // ====== 插入按钮（容器内纵向排列两个按钮）======
     function ensureButton() {
-        if (document.getElementById('__tl_copy_btn')) return;
-        const btn = document.createElement('button');
-        btn.id = '__tl_copy_btn';
-        btn.textContent = BTN_TEXT;
-        btn.title = '复制当前时间轴 HTML 到剪贴板，供 parse_timeline.py 解析';
-        btn.setAttribute('style', [
+        if (document.getElementById('__tl_container')) return;
+        const container = document.createElement('div');
+        container.id = '__tl_container';
+        container.setAttribute('style', [
             'position:fixed', 'right:18px', 'bottom:18px', 'z-index:999999',
+            'display:flex', 'flex-direction:column', 'gap:8px',
+        ].join(';'));
+        document.body.appendChild(container);
+
+        // 切换视图按钮
+        const switchBtn = document.createElement('button');
+        switchBtn.textContent = BTN_SWITCH_TEXT;
+        switchBtn.title = '切换到 施法→时间轴 视图（修改 URL hash）';
+        switchBtn.setAttribute('style', [
+            'padding:9px 16px', 'font-size:14px', 'cursor:pointer',
+            'background:#19be6b', 'color:#fff', 'border:none', 'border-radius:8px',
+            'box-shadow:0 2px 10px rgba(0,0,0,0.35)', 'transition:background .15s',
+        ].join(';'));
+        switchBtn.addEventListener('mouseenter', () => switchBtn.style.background = '#47cb89');
+        switchBtn.addEventListener('mouseleave', () => switchBtn.style.background = '#19be6b');
+        switchBtn.addEventListener('click', switchToTimeline);
+        container.appendChild(switchBtn);
+
+        // 复制按钮
+        const copyBtn = document.createElement('button');
+        copyBtn.id = '__tl_copy_btn';
+        copyBtn.textContent = BTN_COPY_TEXT;
+        copyBtn.title = '复制当前时间轴 HTML 到剪贴板，供 timeline_gui.py 解析';
+        copyBtn.setAttribute('style', [
             'padding:9px 16px', 'font-size:14px', 'cursor:pointer',
             'background:#2d8cf0', 'color:#fff', 'border:none', 'border-radius:8px',
-            'box-shadow:0 2px 10px rgba(0,0,0,0.35)',
-            'transition:background .15s',
+            'box-shadow:0 2px 10px rgba(0,0,0,0.35)', 'transition:background .15s',
         ].join(';'));
-        btn.addEventListener('mouseenter', () => btn.style.background = '#5cadff');
-        btn.addEventListener('mouseleave', () => btn.style.background = '#2d8cf0');
-        btn.addEventListener('click', () => onCopyClick(btn));
-        document.body.appendChild(btn);
+        copyBtn.addEventListener('mouseenter', () => copyBtn.style.background = '#5cadff');
+        copyBtn.addEventListener('mouseleave', () => copyBtn.style.background = '#2d8cf0');
+        copyBtn.addEventListener('click', () => onCopyClick(copyBtn));
+        container.appendChild(copyBtn);
     }
 
     // ====== 启动：SPA 下持续确保按钮存在 ======

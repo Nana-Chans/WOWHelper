@@ -1,0 +1,2 @@
+<a href="/reports/pRtrJnv4bQP6Z7mc?fight=last&amp;source=99&amp;type=casts" class="big-tab view-type-tab selected" id="filter-analyze-tab" onload="changeFilterView('analytical', this)"><span class="zmdi zmdi-eye"></span>
+                            <span class="big-tab-text"><br>分析</span></a>

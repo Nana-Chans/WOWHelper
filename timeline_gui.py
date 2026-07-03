@@ -442,7 +442,8 @@ class TimelineViewer:
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                 data = urllib.request.urlopen(req, timeout=10).read()
-            except Exception:
+            except Exception as e:
+                print(f"[图标] 下载失败 {ability_name} ({url}): {e}", file=sys.stderr)
                 return None
             # 下载到内存后直接转 PNG（JPG 不落盘，无需后续删除）
             try:
@@ -455,7 +456,8 @@ class TimelineViewer:
                 img = img.resize(ICON_SIZE, resample)
                 os.makedirs(icons_dir, exist_ok=True)
                 img.save(local_png)
-            except Exception:
+            except Exception as e:
+                print(f"[图标] 转换失败 {ability_name}: {e}", file=sys.stderr)
                 return None
         # 加载为 tk.PhotoImage（原生支持 PNG，ttk 控件显示稳定）
         try:

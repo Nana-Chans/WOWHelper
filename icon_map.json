@@ -1,0 +1,20 @@
+{
+  "野性成长": "ability_druid_flourish.png",
+  "愈合": "spell_nature_resistnature.png",
+  "回春术": "spell_nature_rejuvenation.png",
+  "迅捷治愈": "inv_relics_idolofrejuvenation.png",
+  "自然迅捷": "spell_nature_ravenform.png",
+  "回春术（萌芽）": "spell_druid_germination.png",
+  "圣光潜力": "inv_12_profession_alchemy_lightpotion_yellow.png",
+  "万灵之召": "inv_ability_druid_convokethespirits.png",
+  "宁静": "spell_nature_tranquility.png",
+  "激活": "spell_nature_lightning.png",
+  "生命绽放": "inv_misc_herb_felblossom.png",
+  "树皮术": "spell_nature_stoneclawtotem.png",
+  "铁木树皮": "spell_druid_ironbark.png",
+  "自然之愈": "ability_shaman_cleansespirit.png",
+  "狂奔怒吼": "spell_druid_stampedingroar_cat.png",
+  "旅行形态": "ability_druid_travelform.png",
+  "野性冲锋": "trade_archaeology_antleredcloakclasp.png",
+  "光注法力药水": "inv_12_profession_alchemy_lightpotion_blue.png"
+}

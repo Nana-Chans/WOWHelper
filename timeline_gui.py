@@ -11,8 +11,10 @@
 import io
 import json
 import os
+import queue
 import re
 import sys
+import threading
 import tkinter as tk
 import urllib.request
 from tkinter import ttk, messagebox, filedialog
@@ -22,6 +24,11 @@ DEFAULT_STRONG_ABILITIES = ["万灵之召", "宁静", "激活"]
 
 ICON_BASE_URL = "https://assets.rpglogs.cn/img/warcraft/abilities/"
 ICON_SIZE = (28, 28)  # 显示尺寸（原图 56×56，放大显示更清晰）
+
+
+def _warn(msg: str):
+    """统一的警告输出。GUI 程序中 stderr 用户看不到，但仍打印便于调试。"""
+    print(f"[WARN] {msg}", file=sys.stderr)
 
 
 # ==================== 时间轴解析（原 parse_timeline.py） ====================
@@ -93,8 +100,7 @@ def _extract_print_events(onmouseover_attr: str):
             obj = json.loads(json_str)
             events.append(obj)
         except json.JSONDecodeError as e:
-            print(f"[WARN] JSON 解析失败: {e}", file=sys.stderr)
-            print(f"       raw: {json_str[:200]}", file=sys.stderr)
+            _warn(f"JSON 解析失败: {e}\n       raw: {json_str[:200]}")
         pos = end
     return events
 
@@ -261,7 +267,7 @@ def parse_content(content: str, source: str = "<clipboard>"):
         )
 
     if not boxes:
-        print("[WARN] 未找到任何 timeline-box", file=sys.stderr)
+        _warn("未找到任何 timeline-box")
 
     cal = _compute_calibration(boxes)
 
@@ -358,10 +364,15 @@ class TimelineViewer:
         self.strong_skills = self._load_strong_skills()  # 从配置文件加载
         self.phases = []          # 阶段起始时间列表(秒,升序)；P1 隐含 0；空=单阶段
         self.phase_entries = []   # 阶段时间 Entry 控件列表(与 phases 对应)
+        self.phase_vars = []      # 阶段时间 StringVar 列表(与 phase_entries 对应)
         self.icon_images = {}     # ability_name -> tk.PhotoImage (保持引用防止GC)
         self.name_to_iconfile = self._load_icon_map()  # name -> icon文件名
+        # 后台图标下载：线程只负责下载+转换+落盘，PhotoImage 在主线程创建
+        self._icon_queue = queue.Queue()  # (name, ok, err_msg)
+        self._pending_icons = set()        # 正在下载的 ability_name
 
         self._build_ui()
+        self._poll_icon_queue()
 
     # ---------- UI 构建 ----------
     def _build_ui(self):
@@ -587,6 +598,7 @@ class TimelineViewer:
         for w in self.phase_frame.winfo_children():
             w.destroy()
         self.phase_entries = []
+        self.phase_vars = []
 
         # P1 固定显示
         ttk.Label(self.phase_frame, text="P1 (0:00)", padding=(4, 0)).pack(side="left")
@@ -601,7 +613,8 @@ class TimelineViewer:
             entry.pack(side="left", padx=(2, 0))
             entry.bind("<Return>", lambda e, idx=i: self._on_phase_change(idx))
             entry.bind("<FocusOut>", lambda e, idx=i: self._on_phase_change(idx))
-            self.phase_entries.append(var)
+            self.phase_vars.append(var)
+            self.phase_entries.append(entry)
             ttk.Button(cell, text="×", width=3,
                        command=lambda idx=i: self._remove_phase(idx)).pack(side="left", padx=(2, 0))
 
@@ -631,13 +644,13 @@ class TimelineViewer:
 
     def _on_phase_change(self, idx: int):
         """阶段时间输入变化时解析并刷新。"""
-        if idx >= len(self.phase_entries):
+        if idx >= len(self.phase_vars):
             return
-        sec = self._parse_time_str(self.phase_entries[idx].get())
+        sec = self._parse_time_str(self.phase_vars[idx].get())
         if sec is None or sec <= 0:
             # 无效输入，回滚显示
             if idx < len(self.phases):
-                self.phase_entries[idx].set(self._sec_to_str(self.phases[idx]))
+                self.phase_vars[idx].set(self._sec_to_str(self.phases[idx]))
             return
         self.phases[idx] = sec
         self.phases.sort()
@@ -646,22 +659,10 @@ class TimelineViewer:
 
     def _focus_phase_entry(self, idx: int):
         """聚焦指定阶段的 Entry 并全选文本。"""
-        # phase_frame 内控件顺序: Label(P1), [cell...], Button(+)
-        # 每个 cell 是 Frame，内含 Label/Entry/Button；Entry 是第2个子控件
-        cells = [w for w in self.phase_frame.winfo_children()
-                 if w.winfo_class() == "TFrame"]
-        # 第一个 TFrame 可能是 phase_frame 自身的子 Frame？这里 cells 是直接子级
-        # 实际 phase_frame 直接子级: Label(P1), cell0, cell1, ..., Button
-        # cell 是 ttk.Frame，TFrame 类
-        real_cells = [w for w in self.phase_frame.winfo_children()
-                      if w.winfo_class() == "TFrame" and w.winfo_children()]
-        if idx < len(real_cells):
-            # cell 内: Label, Entry, Button → Entry 是类 TEntry
-            entries = [c for c in real_cells[idx].winfo_children()
-                       if c.winfo_class() == "TEntry"]
-            if entries:
-                entries[0].focus_set()
-                entries[0].select_range(0, "end")
+        if 0 <= idx < len(self.phase_entries):
+            entry = self.phase_entries[idx]
+            entry.focus_set()
+            entry.select_range(0, "end")
 
     def _reset_phases(self):
         self.phases = []
@@ -704,19 +705,19 @@ class TimelineViewer:
                     try:
                         with open(path, "w", encoding="utf-8") as f:
                             json.dump(result, f, ensure_ascii=False, indent=2)
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        _warn(f"icon_map.json 迁移写回失败: {e}")
                 return result
-        except (OSError, json.JSONDecodeError):
-            pass
+        except (OSError, json.JSONDecodeError) as e:
+            _warn(f"icon_map.json 读取失败: {e}")
         return {}
 
     def _save_icon_map(self):
         try:
             with open(self._icon_map_path(), "w", encoding="utf-8") as f:
                 json.dump(self.name_to_iconfile, f, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
+        except OSError as e:
+            _warn(f"icon_map.json 保存失败: {e}")
 
     def _update_icon_map_from_events(self):
         """从当前事件中收集 name->PNG图标名，更新映射并保存。
@@ -739,6 +740,7 @@ class TimelineViewer:
 
         映射存的是 PNG 文件名。本地无 PNG 时，从 rpglogs 下载 JPG 到内存
         （BytesIO，JPG 不落盘），PIL 转 PNG 并缩放后保存，供 tk.PhotoImage 显示。
+        下载在后台线程进行，主线程不阻塞；下载完成后通过 root.after 回调刷新。
         """
         if not ability_name:
             return None
@@ -749,37 +751,72 @@ class TimelineViewer:
             return None
         icons_dir = self._icons_dir()
         local_png = os.path.join(icons_dir, icon_png)
-        if not os.path.exists(local_png):
-            # 由 PNG 名派生 JPG 名供 URL 使用（rpglogs 源是 .jpg）
+        if os.path.exists(local_png):
+            # 本地已有，直接加载
+            return self._load_photo(ability_name, local_png)
+        # 本地无：派发后台下载（去重）
+        if ability_name in self._pending_icons:
+            return None
+        self._pending_icons.add(ability_name)
+        threading.Thread(
+            target=self._download_icon_worker,
+            args=(ability_name, icon_png, local_png, icons_dir, self._icon_queue),
+            daemon=True,
+        ).start()
+        return None
+
+    @staticmethod
+    def _download_icon_worker(name, icon_png, local_png, icons_dir, out_queue):
+        """后台线程：下载 JPG → PIL 转 PNG 并缩放 → 落盘。结果放入队列。"""
+        try:
             icon_jpg = os.path.splitext(icon_png)[0] + ".jpg"
             url = ICON_BASE_URL + icon_jpg
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            data = urllib.request.urlopen(req, timeout=10).read()
+            from PIL import Image
+            img = Image.open(io.BytesIO(data)).convert("RGBA")
             try:
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                data = urllib.request.urlopen(req, timeout=10).read()
-            except Exception as e:
-                print(f"[图标] 下载失败 {ability_name} ({url}): {e}", file=sys.stderr)
-                return None
-            # 下载到内存后直接转 PNG（JPG 不落盘，无需后续删除）
-            try:
-                from PIL import Image
-                img = Image.open(io.BytesIO(data)).convert("RGBA")
-                try:
-                    resample = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
-                except AttributeError:
-                    resample = Image.LANCZOS  # type: ignore[attr-defined]
-                img = img.resize(ICON_SIZE, resample)
-                os.makedirs(icons_dir, exist_ok=True)
-                img.save(local_png)
-            except Exception as e:
-                print(f"[图标] 转换失败 {ability_name}: {e}", file=sys.stderr)
-                return None
-        # 加载为 tk.PhotoImage（原生支持 PNG，ttk 控件显示稳定）
+                resample = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
+            except AttributeError:
+                resample = Image.LANCZOS  # type: ignore[attr-defined]
+            img = img.resize(ICON_SIZE, resample)
+            os.makedirs(icons_dir, exist_ok=True)
+            img.save(local_png)
+            out_queue.put((name, True, None))
+        except Exception as e:
+            _warn(f"图标下载失败 {name} ({icon_png}): {e}")
+            out_queue.put((name, False, str(e)))
+
+    def _load_photo(self, ability_name, local_png):
+        """在主线程加载 PNG 为 tk.PhotoImage 并缓存。失败返回 None。"""
         try:
             photo = tk.PhotoImage(file=local_png)
             self.icon_images[ability_name] = photo
             return photo
-        except Exception:
+        except Exception as e:
+            _warn(f"图标加载失败 {ability_name}: {e}")
             return None
+
+    def _poll_icon_queue(self):
+        """主线程定期消费后台下载结果，刷新已构建的复选框/表格图标。"""
+        try:
+            while True:
+                name, ok, err = self._icon_queue.get_nowait()
+                self._pending_icons.discard(name)
+                if ok:
+                    # 触发下次 _get_icon 时加载；这里直接刷新图标缓存并重建 UI
+                    icon_png = self.name_to_iconfile.get(name)
+                    if icon_png:
+                        local_png = os.path.join(self._icons_dir(), icon_png)
+                        if os.path.exists(local_png):
+                            self._load_photo(name, local_png)
+                    # 仅当存在已构建的复选框时重建（避免空刷新）
+                    if self.ability_vars:
+                        prev_checked = {n for n, v in self.ability_vars.items() if v.get()}
+                        self._build_checkboxes(prev_checked)
+        except queue.Empty:
+            pass
+        self.root.after(200, self._poll_icon_queue)
 
     # ---------- 复选框 ----------
     def _build_checkboxes(self, prev_checked=None):
@@ -866,8 +903,8 @@ class TimelineViewer:
                 skills = [str(x) for x in data if str(x)]
                 if skills:
                     return skills
-        except (OSError, json.JSONDecodeError):
-            pass
+        except (OSError, json.JSONDecodeError) as e:
+            _warn(f"strong_skills.json 读取失败，使用默认值: {e}")
         # 用默认值并尝试写入
         skills = list(DEFAULT_STRONG_ABILITIES)
         self._save_strong_skills(skills)

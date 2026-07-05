@@ -25,6 +25,12 @@ DEFAULT_STRONG_ABILITIES = ["万灵之召", "宁静", "激活"]
 ICON_BASE_URL = "https://assets.rpglogs.cn/img/warcraft/abilities/"
 ICON_SIZE = (28, 28)  # 显示尺寸（原图 56×56，放大显示更清晰）
 
+# 校准回退占位值：仅在样本不足（n<2）或 css_left 全相同时使用，产出时间不准。
+# 这些值来自历史战斗，仅用于避免除零/NaN，不保证正确性。
+FALLBACK_PX_PER_MS = 70.0 / 1000.0
+FALLBACK_PX_PER_S = 70.0
+FALLBACK_FIGHT_START = 4539957.0
+
 
 def _warn(msg: str):
     """统一的警告输出。GUI 程序中 stderr 用户看不到，但仍打印便于调试。"""
@@ -114,7 +120,11 @@ def _parse_ruler(content: str):
 
 
 def _compute_calibration(boxes):
-    """用最小二乘法从 (timestamp, css_left) 拟合 px_per_ms 与 fight_start。"""
+    """用最小二乘法从 (timestamp, css_left) 拟合 px_per_ms 与 fight_start。
+
+    返回 dict 含 px_per_ms/px_per_s/fight_start/n/calibration_failed。
+    calibration_failed=True 表示样本不足，时间不可信，调用方应提示用户。
+    """
     xs, ys = [], []
     for b in boxes:
         ev = b["events"][0] if b["events"] else None
@@ -124,17 +134,26 @@ def _compute_calibration(boxes):
         ys.append(ev["timestamp"])
     n = len(xs)
     if n < 2:
-        return {"px_per_ms": 70.0 / 1000.0, "px_per_s": 70.0, "fight_start": 4539957.0, "n": n}
+        return {
+            "px_per_ms": FALLBACK_PX_PER_MS, "px_per_s": FALLBACK_PX_PER_S,
+            "fight_start": FALLBACK_FIGHT_START, "n": n, "calibration_failed": True,
+        }
     mean_x = sum(xs) / n
     mean_y = sum(ys) / n
     sxx = sum((x - mean_x) ** 2 for x in xs)
     sxy = sum((xs[i] - mean_x) * (ys[i] - mean_y) for i in range(n))
     if sxx == 0:
-        return {"px_per_ms": 70.0 / 1000.0, "px_per_s": 70.0, "fight_start": mean_y, "n": n}
+        return {
+            "px_per_ms": FALLBACK_PX_PER_MS, "px_per_s": FALLBACK_PX_PER_S,
+            "fight_start": mean_y, "n": n, "calibration_failed": True,
+        }
     a = sxy / sxx
     b = mean_y - a * mean_x
     px_per_ms = 1.0 / a
-    return {"px_per_ms": px_per_ms, "px_per_s": px_per_ms * 1000.0, "fight_start": b, "n": n}
+    return {
+        "px_per_ms": px_per_ms, "px_per_s": px_per_ms * 1000.0,
+        "fight_start": b, "n": n, "calibration_failed": False,
+    }
 
 
 def _format_display_time(sec: float) -> str:
@@ -339,6 +358,7 @@ def parse_content(content: str, source: str = "<clipboard>"):
             "px_per_ms": round(cal["px_per_ms"], 6),
             "fight_start": round(cal["fight_start"], 1),
             "calibration_samples": cal["n"],
+            "calibration_failed": cal["calibration_failed"],
             "total_boxes": len(boxes),
             "total_events": len(out_events),
             "ruler": ruler,
@@ -523,9 +543,11 @@ class TimelineViewer:
 
         self._build_checkboxes()
         self._refresh_table()
-        self.status_var.set(
-            f"共 {len(self.cast_events)} 条 cast · {len(self.ability_counts)} 个技能"
-        )
+        meta = result.get("meta", {})
+        base_status = f"共 {len(self.cast_events)} 条 cast · {len(self.ability_counts)} 个技能"
+        if meta.get("calibration_failed"):
+            base_status += " · ⚠ 校准样本不足，时间可能不准"
+        self.status_var.set(base_status)
 
     def _show_error(self, msg: str):
         """解析失败时在预览区显示错误信息（不弹窗）。"""
@@ -798,24 +820,29 @@ class TimelineViewer:
             return None
 
     def _poll_icon_queue(self):
-        """主线程定期消费后台下载结果，刷新已构建的复选框/表格图标。"""
+        """主线程定期消费后台下载结果，批量刷新图标以避免多次重建闪烁。
+
+        每次轮询把队列里所有已完成的结果一次性取空，仅当本批有成功下载
+        且复选框已构建时，重建一次复选框（而非每条结果都重建）。
+        """
+        any_loaded = False
         try:
             while True:
                 name, ok, err = self._icon_queue.get_nowait()
                 self._pending_icons.discard(name)
                 if ok:
-                    # 触发下次 _get_icon 时加载；这里直接刷新图标缓存并重建 UI
                     icon_png = self.name_to_iconfile.get(name)
                     if icon_png:
                         local_png = os.path.join(self._icons_dir(), icon_png)
                         if os.path.exists(local_png):
-                            self._load_photo(name, local_png)
-                    # 仅当存在已构建的复选框时重建（避免空刷新）
-                    if self.ability_vars:
-                        prev_checked = {n for n, v in self.ability_vars.items() if v.get()}
-                        self._build_checkboxes(prev_checked)
+                            if self._load_photo(name, local_png) is not None:
+                                any_loaded = True
         except queue.Empty:
             pass
+        # 本批有新图标加载成功，且复选框已构建 → 仅重建一次
+        if any_loaded and self.ability_vars:
+            prev_checked = {n for n, v in self.ability_vars.items() if v.get()}
+            self._build_checkboxes(prev_checked)
         self.root.after(200, self._poll_icon_queue)
 
     # ---------- 复选框 ----------
